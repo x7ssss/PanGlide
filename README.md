@@ -93,4 +93,4 @@ src-tauri/target/release/panglide.exe
 ## 📄 License
 
 This project is licensed under the [MIT License](LICENSE) - see the [LICENSE](LICENSE) file for details.  
-Copyright (c) 2026 Plamen Kamenov / PanGlide Contributors.
+Copyright (c) 2026 x7ssss / PanGlide Contributors.
