@@ -1,0 +1,33 @@
+# Rust build artifacts
+/target/
+src-tauri/target/
+
+# Node dependencies and production build
+node_modules/
+dist/
+
+# Video recordings & sidecars
+*.mp4
+*.telemetry.json
+*.privacy.json
+
+# Local DPAPI license vaults & secrets
+panglide.lic
+*.lic
+license.vault
+*.vault
+
+# Scratch and environment files
+fix.js
+fix.cjs
+.env*
+.env
+.env.local
+
+# OS and IDE files
+.DS_Store
+Thumbs.db
+*.log
+*.tsbuildinfo
+.vscode/
+.idea/
