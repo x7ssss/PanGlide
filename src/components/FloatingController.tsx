@@ -101,7 +101,7 @@ export default function FloatingController({
       {/* Record / Stop Capsule Button */}
       <button
         onClick={onToggleRecord}
-        className={`flex items-center space-x-2 px-3 py-1.5 rounded-full text-xs font-semibold tracking-wide transition-all ${
+        className={`flex items-center space-x-2 px-3 py-1.5 rounded-full text-xs font-semibold tracking-wide transition-all cursor-pointer ${
           recordingState.isRecording
             ? "bg-rose-500/20 text-rose-400 hover:bg-rose-500/30 border border-rose-500/40"
             : "bg-indigo-600 hover:bg-indigo-500 text-white shadow-lg shadow-indigo-600/30"
@@ -193,23 +193,20 @@ export default function FloatingController({
         onClick={onTriggerSnip}
         disabled={!recordingState.isRecording}
         title="Live Snip: Snip preceding 5 seconds (Ctrl+Z)"
-        className={`flex items-center space-x-1 px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
+        className={`flex items-center space-x-1.5 px-3 py-1 rounded-full text-xs font-medium border transition-colors ${
           recordingState.isRecording
             ? "border-amber-500/40 text-amber-400 bg-amber-500/10 hover:bg-amber-500/20 cursor-pointer"
             : "border-[#252B3B] text-[#94A3B8]/40 cursor-not-allowed"
         }`}
       >
         <Scissors className="w-3 h-3" />
-        <span>Snip 5s</span>
-        <kbd className="ml-1 px-1 py-0.2 bg-[#0B0D13] border border-[#252B3B] rounded text-[10px] text-[#94A3B8]">
-          ^Z
-        </kbd>
+        <span>Snip 5s (Ctrl+Z)</span>
       </button>
 
       {/* Hotkey Hint */}
       <div className="hidden lg:flex items-center text-[10px] text-[#94A3B8] font-mono">
         <kbd className="px-1.5 py-0.5 bg-[#0B0D13] border border-[#252B3B] rounded text-[10px] text-indigo-400">
-          ^⇧R • F9
+          Ctrl+Shift+R • F9
         </kbd>
       </div>
     </div>

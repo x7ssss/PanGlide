@@ -1,11 +1,11 @@
 import {
   ZoomIn,
   Sliders,
-  Shield,
   Layers,
   Sparkles,
   MousePointer2,
   Scissors,
+  Crosshair,
 } from "lucide-react";
 import type { AspectRatioPreset } from "../types";
 
@@ -22,8 +22,6 @@ interface InspectorSidebarProps {
   onBackdropChange: (val: string) => void;
   showFocusReticle: boolean;
   onToggleFocusReticle: () => void;
-  autoRedactEnabled: boolean;
-  onToggleAutoRedact: () => void;
   springPreset: string;
   onSpringPresetChange: (val: string) => void;
   deadzoneEnabled: boolean;
@@ -47,8 +45,6 @@ export default function InspectorSidebar({
   onBackdropChange,
   showFocusReticle,
   onToggleFocusReticle,
-  autoRedactEnabled,
-  onToggleAutoRedact,
   springPreset,
   onSpringPresetChange,
   deadzoneEnabled,
@@ -199,42 +195,22 @@ export default function InspectorSidebar({
         <p className="text-[10px] text-[#94A3B8] leading-tight">
           Bakes second-order spring camera panning & click zoom into exported video.
         </p>
-      </div>
-
-      <div className="h-[1px] bg-[#252B3B]" />
-
-      {/* 3. Privacy & Redaction Toggles */}
-      <div className="space-y-3">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center space-x-1.5 text-xs font-medium text-[#F9FAFB]">
-            <Shield className="w-3.5 h-3.5 text-amber-400" />
-            <span>Privacy Auto-Redaction</span>
-          </div>
-          <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/30">
-            Amber Kawase
-          </span>
-        </div>
-
-        <label className="flex items-center justify-between p-2.5 rounded bg-[#0B0D13] border border-[#252B3B] cursor-pointer">
-          <div className="text-xs text-[#F9FAFB] font-medium">Pre-Encode Token Masking</div>
-          <input
-            type="checkbox"
-            checked={autoRedactEnabled}
-            onChange={onToggleAutoRedact}
-            className="w-4 h-4 accent-amber-500 rounded cursor-pointer"
-          />
-        </label>
-
         {/* Reticle Focus Indicator Toggle */}
-        <label className="flex items-center justify-between p-2.5 rounded bg-[#0B0D13] border border-[#252B3B] cursor-pointer">
-          <div className="text-xs text-[#F9FAFB] font-medium">Show Focus Reticle</div>
+        <label className="flex items-center justify-between p-2.5 rounded bg-[#0B0D13] border border-[#252B3B] cursor-pointer hover:border-[#3B4358] transition-colors">
+          <div className="flex items-center space-x-2">
+            <Crosshair className="w-3.5 h-3.5 text-amber-400" />
+            <div className="text-xs text-[#F9FAFB] font-medium">Show Focus Reticle</div>
+          </div>
           <input
             type="checkbox"
             checked={showFocusReticle}
             onChange={onToggleFocusReticle}
-            className="w-4 h-4 accent-indigo-500 rounded cursor-pointer"
+            className="w-4 h-4 accent-amber-500 rounded cursor-pointer"
           />
         </label>
+        <p className="text-[10px] text-[#94A3B8] leading-tight">
+          Displays real-time reticle target and zoom multiplier during playback.
+        </p>
       </div>
 
       <div className="h-[1px] bg-[#252B3B]" />

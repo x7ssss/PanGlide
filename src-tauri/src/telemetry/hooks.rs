@@ -5,7 +5,7 @@ use rtrb::{Consumer, Producer, RingBuffer};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 use tauri::Emitter;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -25,6 +25,7 @@ static HOOKS_READY: AtomicBool = AtomicBool::new(false);
 static IS_RECORDING_ACTIVE: AtomicBool = AtomicBool::new(false);
 static LAST_TOGGLE_HOTKEY_MS: AtomicU64 = AtomicU64::new(0);
 static LAST_SNIP_HOTKEY_MS: AtomicU64 = AtomicU64::new(0);
+static TELEMETRY_START_TIME_MS: AtomicU64 = AtomicU64::new(0);
 static SNIP_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 // Active target monitor bounds for lock-free coordinate normalization in < 5ns
@@ -124,6 +125,8 @@ impl InputHookManager {
         if let Ok(mut guard) = GLOBAL_PRODUCER.lock() {
             *guard = Some(producer);
         }
+        let now_ms = unsafe { windows::Win32::System::SystemInformation::GetTickCount64() };
+        TELEMETRY_START_TIME_MS.store(now_ms, Ordering::SeqCst);
         IS_RECORDING_ACTIVE.store(true, Ordering::SeqCst);
         consumer
     }
@@ -131,6 +134,7 @@ impl InputHookManager {
     /// Stop telemetry capture and release the SPSC ring buffer producer
     pub fn stop_telemetry_capture() {
         IS_RECORDING_ACTIVE.store(false, Ordering::SeqCst);
+        TELEMETRY_START_TIME_MS.store(0, Ordering::SeqCst);
         if let Ok(mut guard) = GLOBAL_PRODUCER.lock() {
             *guard = None;
         }
@@ -200,11 +204,21 @@ impl Drop for InputHookManager {
 }
 
 #[inline(always)]
+fn get_current_time_ms_and_us() -> (u64, u64) {
+    let current_tick = unsafe { windows::Win32::System::SystemInformation::GetTickCount64() };
+    let start_tick = TELEMETRY_START_TIME_MS.load(Ordering::Relaxed);
+    let ms = if start_tick > 0 {
+        current_tick.saturating_sub(start_tick)
+    } else {
+        current_tick
+    };
+    (ms, ms * 1000)
+}
+
+#[allow(dead_code)]
+#[inline(always)]
 fn get_current_time_us() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_micros() as u64)
-        .unwrap_or(0)
+    get_current_time_ms_and_us().1
 }
 
 #[inline(always)]
@@ -247,7 +261,7 @@ unsafe extern "system" fn low_level_mouse_proc(
         };
 
         if let Some(evt_type) = event_type {
-            let timestamp_us = get_current_time_us();
+            let (timestamp_ms, timestamp_us) = get_current_time_ms_and_us();
             let raw_x = info.pt.x;
             let raw_y = info.pt.y;
 
@@ -276,6 +290,7 @@ unsafe extern "system" fn low_level_mouse_proc(
 
             let input_event = InputEvent {
                 timestamp_us,
+                timestamp_ms,
                 event_type: evt_type,
                 x: norm_x,
                 y: norm_y,
@@ -314,7 +329,7 @@ unsafe extern "system" fn low_level_keyboard_proc(
         };
 
         if let Some(act) = action {
-            let timestamp_us = get_current_time_us();
+            let (timestamp_ms, timestamp_us) = get_current_time_ms_and_us();
             let modifiers = get_modifiers();
             let vk = info.vkCode;
 
@@ -355,6 +370,7 @@ unsafe extern "system" fn low_level_keyboard_proc(
 
             let input_event = InputEvent {
                 timestamp_us,
+                timestamp_ms,
                 event_type: evt_type,
                 x: norm_x,
                 y: norm_y,

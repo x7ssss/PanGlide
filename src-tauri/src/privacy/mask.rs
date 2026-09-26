@@ -1,4 +1,14 @@
-use crate::privacy::ocr::RedactionRect;
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RedactionRect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub label: String,
+    pub time_ms: u64,
+}
 
 /// Map redaction bounding box from source coordinates through active camera kinematics (center_x, center_y, zoom)
 /// to destination canvas pixel coordinates [x0, y0, x1, y1]
@@ -201,6 +211,7 @@ mod tests {
             width: 120.0,
             height: 30.0,
             label: "API Key".into(),
+            time_ms: 0,
         };
 
         // Source 1920x1080 -> 16:9 1080p target (1920x1080) at 1.0x centered at (960, 540)
@@ -231,6 +242,7 @@ mod tests {
             width: 100.0,
             height: 40.0,
             label: "Secret".into(),
+            time_ms: 0,
         };
 
         // Zoom 1.5x focused on (800, 400)

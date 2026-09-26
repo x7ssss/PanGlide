@@ -67,8 +67,8 @@ impl TokenPatternLibrary {
 
     pub fn new() -> Self {
         Self {
-            // Stripe: (?:r|s)k_live_[0-9a-zA-Z]{24,99}
-            stripe_regex: Regex::new(r"(?:r|s)k_live_[0-9a-zA-Z]{24,99}").unwrap(),
+            // Stripe: (?:r|s)k_(?:live|test)_[0-9a-zA-Z]{16,99}
+            stripe_regex: Regex::new(r"(?:r|s)k_(?:live|test)_[0-9a-zA-Z]{16,99}").unwrap(),
 
             // GitHub: gh[pousr]_[A-Za-z0-9_]{36,255} (also supporting modern github_pat_)
             github_regex: Regex::new(r"gh[pousr]_[A-Za-z0-9_]{36,255}|github_pat_[0-9a-zA-Z_]{60,}").unwrap(),

@@ -45,7 +45,7 @@ pub struct ExportRenderPayload {
     #[serde(default, alias = "pre_encode_token_masking")]
     pub pre_encode_token_masking: Option<bool>,
     #[serde(default, alias = "redaction_rects")]
-    pub redaction_rects: Option<Vec<crate::privacy::ocr::RedactionRect>>,
+    pub redaction_rects: Option<Vec<crate::privacy::mask::RedactionRect>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -358,11 +358,18 @@ pub fn transcode_video(
 
         // Determine if dynamic camera auto-tracking is enabled
         let is_auto_tracking = payload.auto_tracking.unwrap_or(true);
-        let camera_frames: Option<Vec<crate::kinematics::CameraFrame>> = if is_auto_tracking {
+        let mut camera_frames: Option<Vec<crate::kinematics::CameraFrame>> = if is_auto_tracking {
             sidecar.as_ref().map(|s| crate::kinematics::generate_camera_path(s, in_width, in_height))
         } else {
             None
         };
+
+        if camera_frames.is_none() && is_auto_tracking {
+            let solved = crate::kinematics::get_solved_camera_keyframes(payload.source_path.clone());
+            if !solved.is_empty() {
+                camera_frames = Some(solved);
+            }
+        }
 
         if let Some(ref cf) = camera_frames {
             eprintln!(
@@ -388,10 +395,14 @@ pub fn transcode_video(
 
         // Determine if pre-encode frosted glass token redaction is enabled
         let is_token_masking = payload.pre_encode_token_masking.unwrap_or(true);
-        let redactions: Vec<crate::privacy::ocr::RedactionRect> = if is_token_masking {
-            if let Some(ref rects) = payload.redaction_rects {
+        let redactions: Vec<crate::privacy::mask::RedactionRect> = if is_token_masking {
+            let mut list = if let Some(ref rects) = payload.redaction_rects {
                 rects.clone()
             } else {
+                Vec::new()
+            };
+
+            if list.is_empty() {
                 let privacy_cand1 = src_path.with_extension("privacy.json");
                 let privacy_cand2 = {
                     let mut s = payload.source_path.clone();
@@ -399,19 +410,19 @@ pub fn transcode_video(
                     std::path::PathBuf::from(s)
                 };
                 if privacy_cand1.exists() {
-                    std::fs::read_to_string(&privacy_cand1)
+                    list = std::fs::read_to_string(&privacy_cand1)
                         .ok()
-                        .and_then(|c| serde_json::from_str::<Vec<crate::privacy::ocr::RedactionRect>>(&c).ok())
-                        .unwrap_or_default()
+                        .and_then(|c| serde_json::from_str::<Vec<crate::privacy::mask::RedactionRect>>(&c).ok())
+                        .unwrap_or_default();
                 } else if privacy_cand2.exists() {
-                    std::fs::read_to_string(&privacy_cand2)
+                    list = std::fs::read_to_string(&privacy_cand2)
                         .ok()
-                        .and_then(|c| serde_json::from_str::<Vec<crate::privacy::ocr::RedactionRect>>(&c).ok())
-                        .unwrap_or_default()
-                } else {
-                    Vec::new()
+                        .and_then(|c| serde_json::from_str::<Vec<crate::privacy::mask::RedactionRect>>(&c).ok())
+                        .unwrap_or_default();
                 }
             }
+
+            list
         } else {
             Vec::new()
         };
@@ -848,6 +859,7 @@ mod tests {
                 events: vec![
                     crate::telemetry::types::InputEvent {
                         timestamp_us: 100_000,
+                        timestamp_ms: 100,
                         event_type: crate::telemetry::types::InputEventType::MouseDown,
                         x: 0.7,
                         y: 0.6,
@@ -907,19 +919,21 @@ mod tests {
             if let Some(src) = source_file {
                 let out_file = std::env::temp_dir().join("test_pre_encode_redaction.mp4");
                 let redaction_rects = vec![
-                    crate::privacy::ocr::RedactionRect {
+                    crate::privacy::mask::RedactionRect {
                         x: 100.0,
                         y: 100.0,
                         width: 300.0,
                         height: 50.0,
                         label: "Stripe Secret Key".to_string(),
+                        time_ms: 0,
                     },
-                    crate::privacy::ocr::RedactionRect {
+                    crate::privacy::mask::RedactionRect {
                         x: 0.5,
                         y: 0.5,
                         width: 0.2,
                         height: 0.05,
                         label: "Normalized GitHub Token".to_string(),
+                        time_ms: 0,
                     }
                 ];
 

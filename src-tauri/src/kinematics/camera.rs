@@ -1,17 +1,24 @@
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use std::sync::Mutex;
 use crate::kinematics::physics::{SpringDamper, SpringDamper2D, SpringPreset, VelocityDeadZoneFilter};
-use crate::telemetry::types::{InputEventType, TelemetrySidecar};
+use crate::telemetry::types::TelemetrySidecar;
 
 pub type SessionTelemetry = TelemetrySidecar;
 
 /// Represents the camera viewport transform for a single 60 FPS CFR video frame
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct CameraFrame {
-    pub frame_index: u64,
-    pub center_x: f32,
-    pub center_y: f32,
+    pub timestamp_ms: u64,
+    pub x: f32, // normalized [0.0..1.0]
+    pub y: f32, // normalized [0.0..1.0]
     pub zoom: f32,
+    #[serde(default)]
+    pub frame_index: u64,
+    #[serde(default)]
+    pub center_x: f32,
+    #[serde(default)]
+    pub center_y: f32,
 }
 
 impl CameraFrame {
@@ -23,17 +30,24 @@ impl CameraFrame {
         let half_w = view_w * 0.5;
         let half_h = view_h * 0.5;
 
-        let left = (self.center_x - half_w).clamp(0.0, source_w as f32 - view_w);
-        let top = (self.center_y - half_h).clamp(0.0, source_h as f32 - view_h);
+        let cx = if self.center_x > 0.0 { self.center_x } else { self.x * source_w as f32 };
+        let cy = if self.center_y > 0.0 { self.center_y } else { self.y * source_h as f32 };
+
+        let left = (cx - half_w).clamp(0.0, source_w as f32 - view_w);
+        let top = (cy - half_h).clamp(0.0, source_h as f32 - view_h);
         (left, top, view_w, view_h)
     }
 
     /// Return normalized center coordinates [0.0..1.0]
     pub fn normalized_center(&self, source_w: u32, source_h: u32) -> (f32, f32) {
-        (
-            (self.center_x / source_w as f32).clamp(0.0, 1.0),
-            (self.center_y / source_h as f32).clamp(0.0, 1.0),
-        )
+        if self.x > 0.0 || self.y > 0.0 {
+            (self.x.clamp(0.0, 1.0), self.y.clamp(0.0, 1.0))
+        } else {
+            (
+                (self.center_x / source_w as f32).clamp(0.0, 1.0),
+                (self.center_y / source_h as f32).clamp(0.0, 1.0),
+            )
+        }
     }
 }
 
@@ -143,11 +157,17 @@ impl KinematicCamera {
         let center_x = raw_x.clamp(half_w, self.screen_width - half_w);
         let center_y = raw_y.clamp(half_h, self.screen_height - half_h);
 
+        let sw = if self.screen_width > 0.0 { self.screen_width } else { 1920.0 };
+        let sh = if self.screen_height > 0.0 { self.screen_height } else { 1080.0 };
+
         let frame = CameraFrame {
+            timestamp_ms: (self.current_frame_index as f64 * (1000.0 / 60.0)).round() as u64,
+            x: (center_x / sw).clamp(0.0, 1.0),
+            y: (center_y / sh).clamp(0.0, 1.0),
+            zoom: cur_zoom,
             frame_index: self.current_frame_index,
             center_x,
             center_y,
-            zoom: cur_zoom,
         };
 
         self.current_frame_index += 1;
@@ -155,9 +175,235 @@ impl KinematicCamera {
     }
 }
 
+/// Global cache of latest solved camera keyframes for zero-latency retrieval
+static CACHED_KEYFRAMES: Mutex<Option<(String, Vec<CameraFrame>)>> = Mutex::new(None);
+
+pub fn cache_latest_keyframes(identifier: String, frames: Vec<CameraFrame>) {
+    if let Ok(mut guard) = CACHED_KEYFRAMES.lock() {
+        *guard = Some((identifier, frames));
+    }
+}
+
+/// Deterministic click-zoom state solver and second-order spring-damper camera solver
+pub fn solve_camera_keyframes(
+    events: &[crate::telemetry::types::InputEvent],
+    duration_ms: u64,
+    source_w: u32,
+    source_h: u32,
+    zoom_scale: f32,
+) -> Vec<CameraFrame> {
+    #[derive(Clone, Copy, Debug)]
+    struct ClickEvent {
+        timestamp_ms: u64,
+        cx: f32,
+        cy: f32,
+    }
+
+    let mut clicks: Vec<ClickEvent> = Vec::new();
+    for evt in events {
+        // Capture left-clicks (WM_LBUTTONDOWN) with normalized (x, y) in [0.0, 1.0]
+        if evt.event_type == crate::telemetry::types::InputEventType::MouseDown && (evt.button == 1 || evt.button == 0) {
+            let t_ms = evt.get_timestamp_ms();
+            clicks.push(ClickEvent {
+                timestamp_ms: t_ms,
+                cx: evt.x.clamp(0.0, 1.0),
+                cy: evt.y.clamp(0.0, 1.0),
+            });
+        }
+    }
+
+    // Re-base timestamps if UNIX epoch was used in older recordings
+    if let Some(first) = clicks.first() {
+        if first.timestamp_ms > 10_000_000 {
+            let base = first.timestamp_ms;
+            for c in &mut clicks {
+                c.timestamp_ms = c.timestamp_ms.saturating_sub(base);
+            }
+        }
+    }
+
+    let total_duration_ms = if duration_ms > 0 {
+        duration_ms
+    } else if let Some(last_evt) = events.last() {
+        last_evt.get_timestamp_ms().max(1000)
+    } else {
+        clicks.last().map(|c| c.timestamp_ms + 2500).unwrap_or(3000)
+    };
+
+    let total_frames = ((total_duration_ms as f64 * 60.0) / 1000.0).ceil() as u64;
+    let total_frames = total_frames.max(1);
+
+    let tension = 170.0f32;
+    let damping = 26.0f32;
+    let dt = 1.0f32 / 60.0f32;
+    let target_zoom_scale = if zoom_scale >= 1.1 { zoom_scale } else { 1.5f32 };
+    let dwell_time_ms = 2000u64; // 2.0s dwell time
+
+    let mut current_x = 0.5f32;
+    let mut current_y = 0.5f32;
+    let mut current_zoom = 1.0f32;
+    let mut vel_x = 0.0f32;
+    let mut vel_y = 0.0f32;
+    let mut vel_zoom = 0.0f32;
+
+    let sw = if source_w > 0 { source_w as f32 } else { 1920.0 };
+    let sh = if source_h > 0 { source_h as f32 } else { 1080.0 };
+
+    let mut keyframes = Vec::with_capacity(total_frames as usize);
+
+    for frame_idx in 0..total_frames {
+        let t_ms = (frame_idx as f64 * (1000.0 / 60.0)).round() as u64;
+
+        // 1. Click Event Ingestion & Deterministic Zoom State Machine:
+        // Default state: target_zoom = 1.0, target_center = (0.5, 0.5)
+        // On click event at (cx, cy):
+        //   Set target_zoom = 1.5 (or user inspector setting)
+        //   Set target_center = (cx, cy)
+        //   Hold this zoom target for a dwell time of 2.0 seconds after the click.
+        // After 2.0 seconds of no clicks:
+        //   Ease target_zoom back to 1.0
+        //   Ease target_center back to (0.5, 0.5)
+        let latest_click = clicks.iter().filter(|c| c.timestamp_ms <= t_ms).last();
+
+        let (target_x, target_y, target_zoom) = match latest_click {
+            Some(click) if t_ms.saturating_sub(click.timestamp_ms) <= dwell_time_ms => {
+                (click.cx, click.cy, target_zoom_scale)
+            }
+            _ => (0.5f32, 0.5f32, 1.0f32),
+        };
+
+        // 2. Second-Order Spring-Damper Solver (sub-stepped for numerical stability):
+        let sub_steps = 2;
+        let sub_dt = dt / sub_steps as f32;
+
+        for _ in 0..sub_steps {
+            let accel_x = tension * (target_x - current_x) - damping * vel_x;
+            vel_x += accel_x * sub_dt;
+            current_x += vel_x * sub_dt;
+
+            let accel_y = tension * (target_y - current_y) - damping * vel_y;
+            vel_y += accel_y * sub_dt;
+            current_y += vel_y * sub_dt;
+
+            let accel_zoom = tension * (target_zoom - current_zoom) - damping * vel_zoom;
+            vel_zoom += accel_zoom * sub_dt;
+            current_zoom += vel_zoom * sub_dt;
+        }
+
+        current_zoom = current_zoom.max(1.0);
+
+        // Clamp current_x and current_y so the zoomed viewport never extends outside the monitor bounds:
+        // half_w = 0.5 / current_zoom; half_h = 0.5 / current_zoom;
+        // current_x = current_x.clamp(half_w, 1.0 - half_w);
+        // current_y = current_y.clamp(half_h, 1.0 - half_h);
+        let half_w = 0.5f32 / current_zoom;
+        let half_h = 0.5f32 / current_zoom;
+        current_x = current_x.clamp(half_w, 1.0f32 - half_w);
+        current_y = current_y.clamp(half_h, 1.0f32 - half_h);
+
+        keyframes.push(CameraFrame {
+            timestamp_ms: t_ms,
+            x: current_x,
+            y: current_y,
+            zoom: current_zoom,
+            frame_index: frame_idx,
+            center_x: current_x * sw,
+            center_y: current_y * sh,
+        });
+    }
+
+    keyframes
+}
+
+/// Expose Tauri command get_solved_camera_keyframes(session_id: String) -> Vec<CameraFrame>
+#[tauri::command]
+pub fn get_solved_camera_keyframes(session_id: String) -> Vec<CameraFrame> {
+    // 1. Check in-memory cache
+    if let Ok(guard) = CACHED_KEYFRAMES.lock() {
+        if let Some((ref id, ref frames)) = *guard {
+            if session_id.is_empty() || session_id == "latest" || id == &session_id || session_id.contains(id) || id.contains(&session_id) {
+                return frames.clone();
+            }
+        }
+    }
+
+    // 2. Direct path candidates
+    let mut candidates = Vec::new();
+    if !session_id.is_empty() && session_id != "latest" {
+        candidates.push(PathBuf::from(&session_id));
+        candidates.push(PathBuf::from(&session_id).with_extension("telemetry.json"));
+        let mut p = PathBuf::from(&session_id);
+        p.set_extension("telemetry.json");
+        candidates.push(p);
+
+        let local_app_data = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| "C:/ProgramData".to_string());
+        let rec_dir = PathBuf::from(local_app_data).join("PanGlide").join("recordings");
+        candidates.push(rec_dir.join(&session_id));
+        candidates.push(rec_dir.join(format!("{}.telemetry.json", session_id)));
+    }
+
+    for cand in &candidates {
+        if cand.exists() {
+            if let Ok(content) = std::fs::read_to_string(cand) {
+                if let Ok(sidecar) = serde_json::from_str::<crate::telemetry::types::TelemetrySidecar>(&content) {
+                    let frames = solve_camera_keyframes(
+                        &sidecar.events,
+                        sidecar.metadata.duration_ms,
+                        sidecar.metadata.display_width,
+                        sidecar.metadata.display_height,
+                        1.5,
+                    );
+                    cache_latest_keyframes(session_id.clone(), frames.clone());
+                    return frames;
+                }
+            }
+        }
+    }
+
+    // 3. Check recordings directory for latest telemetry sidecar
+    let local_app_data = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| "C:/ProgramData".to_string());
+    let rec_dir = PathBuf::from(local_app_data).join("PanGlide").join("recordings");
+    if rec_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(&rec_dir) {
+            let mut sidecars: Vec<_> = entries
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    name.ends_with(".telemetry.json")
+                })
+                .collect();
+            sidecars.sort_by_key(|e| e.metadata().and_then(|m| m.modified()).unwrap_or(std::time::SystemTime::UNIX_EPOCH));
+            if let Some(latest) = sidecars.last() {
+                if let Ok(content) = std::fs::read_to_string(latest.path()) {
+                    if let Ok(sidecar) = serde_json::from_str::<crate::telemetry::types::TelemetrySidecar>(&content) {
+                        let frames = solve_camera_keyframes(
+                            &sidecar.events,
+                            sidecar.metadata.duration_ms,
+                            sidecar.metadata.display_width,
+                            sidecar.metadata.display_height,
+                            1.5,
+                        );
+                        cache_latest_keyframes(session_id, frames.clone());
+                        return frames;
+                    }
+                }
+            }
+        }
+    }
+
+    // 4. Return cached frames if any exist
+    if let Ok(guard) = CACHED_KEYFRAMES.lock() {
+        if let Some((_, ref frames)) = *guard {
+            return frames.clone();
+        }
+    }
+
+    Vec::new()
+}
+
 /// Generate a 60 FPS kinematic camera path for an entire recording session
 pub fn generate_camera_path(telemetry: &SessionTelemetry, source_w: u32, source_h: u32) -> Vec<CameraFrame> {
-    generate_camera_path_with_preset(telemetry, source_w, source_h, SpringPreset::Cinematic, 1.5)
+    solve_camera_keyframes(&telemetry.events, telemetry.metadata.duration_ms, source_w, source_h, 1.5)
 }
 
 /// Generate a 60 FPS kinematic camera path with custom spring preset and zoom scale
@@ -165,82 +411,10 @@ pub fn generate_camera_path_with_preset(
     telemetry: &SessionTelemetry,
     source_w: u32,
     source_h: u32,
-    preset: SpringPreset,
+    _preset: SpringPreset,
     click_zoom: f32,
 ) -> Vec<CameraFrame> {
-    let sw = source_w as f32;
-    let sh = source_h as f32;
-
-    let mut camera = KinematicCamera::new(sw, sh, preset, click_zoom);
-
-    // Determine session duration and total frames at 60 FPS
-    let duration_ms = if telemetry.metadata.duration_ms > 0 {
-        telemetry.metadata.duration_ms
-    } else if let Some(last) = telemetry.events.last() {
-        last.timestamp_us / 1000
-    } else {
-        1000
-    };
-
-    let total_frames = if telemetry.metadata.frame_count > 0 {
-        telemetry.metadata.frame_count
-    } else {
-        ((duration_ms as f64 * 60.0) / 1000.0).ceil() as u64
-    }.max(1);
-
-    // Determine timestamp baseline (handling UNIX epoch vs relative 0-based timestamps)
-    let base_time_us = if let Some(first) = telemetry.events.first() {
-        if first.timestamp_us > 10_000_000_000 {
-            first.timestamp_us
-        } else {
-            0
-        }
-    } else {
-        0
-    };
-
-    let mut event_idx = 0;
-    let num_events = telemetry.events.len();
-    let dt = 1.0 / 60.0;
-    let mut frames = Vec::with_capacity(total_frames as usize);
-
-    for f_idx in 0..total_frames {
-        let frame_time_us = (f_idx as f64 * (1_000_000.0 / 60.0)) as u64;
-
-        // Process all events up to current frame time
-        while event_idx < num_events {
-            let evt = &telemetry.events[event_idx];
-            let rel_time_us = evt.timestamp_us.saturating_sub(base_time_us);
-
-            if rel_time_us > frame_time_us {
-                break;
-            }
-
-            let px = evt.x * sw;
-            let py = evt.y * sh;
-
-            match evt.event_type {
-                InputEventType::MouseDown => {
-                    camera.on_mouse_down(px, py, rel_time_us);
-                }
-                InputEventType::Move => {
-                    camera.on_mouse_move(px, py, rel_time_us);
-                }
-                _ => {}
-            }
-
-            event_idx += 1;
-        }
-
-        // Inactivity evaluation (2.0s idle returns camera to center)
-        camera.check_inactivity(frame_time_us);
-
-        // Advance physical simulation by 1/60s
-        let frame = camera.update(dt);
-        frames.push(frame);
-    }
-
-    frames
+    solve_camera_keyframes(&telemetry.events, telemetry.metadata.duration_ms, source_w, source_h, click_zoom)
 }
 
 #[cfg(test)]
@@ -400,6 +574,7 @@ mod tests {
             events: vec![
                 InputEvent {
                     timestamp_us: 100_000,
+                    timestamp_ms: 100,
                     event_type: InputEventType::MouseDown,
                     x: 0.7,
                     y: 0.7,
@@ -408,6 +583,7 @@ mod tests {
                 },
                 InputEvent {
                     timestamp_us: 200_000,
+                    timestamp_ms: 200,
                     event_type: InputEventType::Move,
                     x: 0.72,
                     y: 0.72,
@@ -497,6 +673,7 @@ mod tests {
         // Initial click at center (0.5, 0.5) to trigger zoom focus
         events.push(InputEvent {
             timestamp_us: 0,
+            timestamp_ms: 0,
             event_type: InputEventType::MouseDown,
             x: 0.5,
             y: 0.5,
@@ -510,10 +687,11 @@ mod tests {
             let factor = i as f32 / 120.0;
             events.push(InputEvent {
                 timestamp_us: t_us,
-                event_type: InputEventType::Move,
+                timestamp_ms: (t_us / 1000),
+                event_type: InputEventType::MouseDown,
                 x: 0.5 + factor * 0.4,
                 y: 0.5 + factor * 0.4,
-                button: 0,
+                button: 1,
                 key_code: 0,
             });
         }
@@ -551,6 +729,54 @@ mod tests {
             assert!(top >= 0.0);
             assert!(left + vw <= 1920.01);
             assert!(top + vh <= 1080.01);
+        }
+    }
+
+    #[test]
+    fn test_solve_camera_keyframes_deterministic_gliding() {
+        // Create 5-second test scenario with click at (0.2, 0.3) at t = 1000ms
+        let events = vec![
+            InputEvent {
+                timestamp_us: 1_000_000,
+                timestamp_ms: 1000,
+                event_type: InputEventType::MouseDown,
+                x: 0.2,
+                y: 0.3,
+                button: 1,
+                key_code: 0,
+            },
+        ];
+
+        let frames = solve_camera_keyframes(&events, 5000, 1920, 1080, 1.5);
+        assert_eq!(frames.len(), 300); // 5 sec * 60 fps = 300 frames
+
+        // Frame 0 (t = 0): exactly centered at 1.0x
+        assert_eq!(frames[0].zoom, 1.0);
+        assert!((frames[0].x - 0.5).abs() < 1e-4);
+        assert!((frames[0].y - 0.5).abs() < 1e-4);
+
+        // Frame 60 (t = 1000ms, click moment): starts zooming in
+        let f_click = &frames[60];
+        assert_eq!(f_click.timestamp_ms, 1000);
+
+        // Frame 120 (t = 2000ms, 1.0s after click): camera is zoomed in (~1.5x) and panned toward click
+        let f_zoomed = &frames[120];
+        assert!(f_zoomed.zoom > 1.45, "Zoom must reach target 1.5x (got {})", f_zoomed.zoom);
+        assert!(f_zoomed.x < 0.45, "Camera X must glide towards click 0.2 (got {})", f_zoomed.x);
+        assert!(f_zoomed.y < 0.45, "Camera Y must glide towards click 0.3 (got {})", f_zoomed.y);
+
+        // Frame 270 (t = 4500ms, 3.5s after click, > 2.0s dwell): camera eases back to 1.0x and (0.5, 0.5)
+        let f_idle = &frames[270];
+        assert!(f_idle.zoom < 1.05, "Zoom must return to 1.0x idle (got {})", f_idle.zoom);
+        assert!((f_idle.x - 0.5).abs() < 0.05, "Center X must return to 0.5 idle (got {})", f_idle.x);
+        assert!((f_idle.y - 0.5).abs() < 0.05, "Center Y must return to 0.5 idle (got {})", f_idle.y);
+
+        // Clamping check across all frames
+        for f in &frames {
+            let half_w = 0.5 / f.zoom;
+            let half_h = 0.5 / f.zoom;
+            assert!(f.x >= half_w - 1e-4 && f.x <= 1.0 - half_w + 1e-4, "Viewport X extends outside bounds: {} not in [{}, {}]", f.x, half_w, 1.0 - half_w);
+            assert!(f.y >= half_h - 1e-4 && f.y <= 1.0 - half_h + 1e-4, "Viewport Y extends outside bounds: {} not in [{}, {}]", f.y, half_h, 1.0 - half_h);
         }
     }
 }

@@ -49,6 +49,17 @@ export interface LicenseStatus {
   expiryDate: string;
 }
 
+export interface CameraFrame {
+  timestamp_ms?: number;
+  timestampMs?: number;
+  x: number;
+  y: number;
+  zoom: number;
+  frameIndex?: number;
+  centerX?: number;
+  centerY?: number;
+}
+
 export interface RecordingResult {
   videoPath: string;
   videoUrl: string;
@@ -56,6 +67,7 @@ export interface RecordingResult {
   frameCount: number;
   width: number;
   height: number;
+  cameraKeyframes?: CameraFrame[];
   autoBlurMarkers: AutoBlurMarker[];
   rejectedTakes: RejectedTakeSegment[];
   rejectedTakeIntervals?: RejectedTakeSegment[];

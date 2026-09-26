@@ -1,8 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import {
   Download,
-  Key,
-  ShieldCheck,
   Video,
   CheckCircle2,
   X,
@@ -15,11 +13,10 @@ import StudioCanvas from "./components/StudioCanvas";
 import InspectorSidebar from "./components/InspectorSidebar";
 import Timeline from "./components/Timeline";
 import ExportModal, { ExportConfig } from "./components/ExportModal";
-import LicenseModal from "./components/LicenseModal";
 import type {
   AspectRatioPreset,
   AutoBlurMarker,
-  LicenseStatus,
+  CameraFrame,
   RecordingState,
   RecordingResult,
   RejectedTakeSegment,
@@ -34,7 +31,7 @@ export default function App() {
   const [dropShadowSpread, setDropShadowSpread] = useState(36);
   const [backdropId, setBackdropId] = useState("aurora");
   const [showFocusReticle, setShowFocusReticle] = useState(true);
-  const [autoRedactEnabled, setAutoRedactEnabled] = useState(true);
+  const [autoRedactEnabled] = useState(true);
   const [springPreset, setSpringPreset] = useState("snappy");
   const [deadzoneEnabled, setDeadzoneEnabled] = useState(true);
   const [pruneRejectedTakes, setPruneRejectedTakes] = useState(true);
@@ -42,7 +39,6 @@ export default function App() {
 
   // Modals state
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
-  const [isLicenseModalOpen, setIsLicenseModalOpen] = useState(false);
   const [exportToast, setExportToast] = useState<{
     filePath: string;
     resolution: string;
@@ -64,6 +60,7 @@ export default function App() {
   // Real Captured Video (via asset protocol, no base64)
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [rawVideoPath, setRawVideoPath] = useState<string | null>(null);
+  const [solvedKeyframes, setSolvedKeyframes] = useState<CameraFrame[]>([]);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
 
@@ -78,29 +75,7 @@ export default function App() {
   const [cameraCenter, setCameraCenter] = useState({ x: 0.5, y: 0.5 });
   const [telemetryPoint, setTelemetryPoint] = useState<{ x: number; y: number } | null>(null);
 
-  // Real License State (Loaded from DPAPI Vault on mount)
-  const [licenseStatus, setLicenseStatus] = useState<LicenseStatus>({
-    isActivated: false,
-    licenseKey: "",
-    instanceId: "",
-    hardwareFingerprint: "Detecting Hardware...",
-    verifiedOffline: true,
-    verificationLatencyMs: 0.0,
-    expiryDate: "Evaluation Mode",
-  });
-
   const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
-
-  // 1. Initial Mount: Load DPAPI license status
-  useEffect(() => {
-    invoke<LicenseStatus>("get_license_status")
-      .then((status) => {
-        setLicenseStatus(status);
-      })
-      .catch((err) => {
-        console.warn("[PanGlide] Could not load license status:", err);
-      });
-  }, []);
 
   // 2. Active Recording Poller: Polls Rust backend for real elapsed time and frame count
   useEffect(() => {
@@ -183,6 +158,7 @@ export default function App() {
       setIsPlaying(false);
       setVideoUrl(null);
       setRawVideoPath(null);
+      setSolvedKeyframes([]);
       setAutoBlurMarkers([]);
       setRejectedTakes([]);
       setZoomKeyframes([]);
@@ -237,6 +213,7 @@ export default function App() {
         console.log("[PanGlide] Loaded video asset URL:", assetUrl, "from clean path:", cleanPath);
         setVideoUrl(assetUrl);
       }
+      setSolvedKeyframes(result.cameraKeyframes || []);
       setDurationMs(result.durationMs);
       setAutoBlurMarkers(result.autoBlurMarkers);
       setRejectedTakes(result.rejectedTakeIntervals || result.rejectedTakes || []);
@@ -341,34 +318,6 @@ export default function App() {
     selectedSourceRef.current = sourceId;
   };
 
-  // 9. License Handlers wired to DPAPI backend
-  const handleActivateLicense = async (key: string): Promise<boolean> => {
-    try {
-      const updated = await invoke<LicenseStatus>("activate_license_key", { licenseKey: key });
-      setLicenseStatus(updated);
-      return updated.isActivated;
-    } catch {
-      try {
-        const updated = await invoke<LicenseStatus>("activate_license", { licenseKey: key });
-        setLicenseStatus(updated);
-        return updated.isActivated;
-      } catch (err) {
-        console.error("[PanGlide] License activation failed:", err);
-        return false;
-      }
-    }
-  };
-
-  const handleDeactivateLicense = async () => {
-    try {
-      await invoke("deactivate_license");
-      const status = await invoke<LicenseStatus>("get_license_status");
-      setLicenseStatus(status);
-    } catch (err) {
-      console.error("[PanGlide] License deactivation failed:", err);
-    }
-  };
-
   const handleStartExport = (config: ExportConfig) => {
     console.log("[PanGlide] Master export finished:", config);
   };
@@ -386,30 +335,12 @@ export default function App() {
             <span className="text-sm font-bold tracking-tight text-white">PanGlide</span>
           </div>
           <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-[#0B0D13] text-indigo-400 border border-[#252B3B]">
-            Studio Core v1.0
+            v1.0.0 • Open Source
           </span>
         </div>
 
         {/* Header Actions */}
         <div className="flex items-center space-x-3">
-          {/* License Status Badge */}
-          <button
-            onClick={() => setIsLicenseModalOpen(true)}
-            className="flex items-center space-x-1.5 px-2.5 py-1 rounded-full bg-[#0B0D13] border border-[#252B3B] hover:border-[#3B4358] text-xs transition-colors cursor-pointer"
-          >
-            {licenseStatus.isActivated ? (
-              <span className="flex items-center space-x-1 px-2 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 font-bold text-[11px] tracking-wide shadow-sm shadow-emerald-500/20">
-                <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-                <span>PRO</span>
-              </span>
-            ) : (
-              <span className="flex items-center space-x-1.5 text-[11px] text-amber-300 font-medium">
-                <Key className="w-3.5 h-3.5 text-amber-400" />
-                <span>Activate License</span>
-              </span>
-            )}
-          </button>
-
           {/* Export Master Button */}
           <button
             onClick={() => setIsExportModalOpen(true)}
@@ -445,12 +376,27 @@ export default function App() {
             cameraCenter={cameraCenter}
             isRecording={recordingState.isRecording}
             videoUrl={videoUrl}
+            videoPath={rawVideoPath}
+            solvedKeyframes={solvedKeyframes}
             onResetVideo={handleResetVideo}
             telemetryPoint={telemetryPoint}
             videoRef={videoRef}
             isPlaying={isPlaying}
             onTogglePlay={handleTogglePlay}
-            onTimeUpdate={(tSec) => setCurrentPlayheadMs(tSec * 1000)}
+            onTimeUpdate={(tSec) => {
+              const currentMs = tSec * 1000;
+              if (pruneRejectedTakes && rejectedTakes.length > 0) {
+                const activeTake = rejectedTakes.find(
+                  (take) => currentMs >= take.startTimeMs && currentMs < take.endTimeMs
+                );
+                if (activeTake && videoRef.current) {
+                  videoRef.current.currentTime = activeTake.endTimeMs / 1000;
+                  setCurrentPlayheadMs(activeTake.endTimeMs);
+                  return;
+                }
+              }
+              setCurrentPlayheadMs(currentMs);
+            }}
             onLoadedMetadata={(durSec) => setDurationMs(durSec * 1000)}
             onEnded={() => {
               setIsPlaying(false);
@@ -476,8 +422,6 @@ export default function App() {
           onBackdropChange={setBackdropId}
           showFocusReticle={showFocusReticle}
           onToggleFocusReticle={() => setShowFocusReticle(!showFocusReticle)}
-          autoRedactEnabled={autoRedactEnabled}
-          onToggleAutoRedact={() => setAutoRedactEnabled(!autoRedactEnabled)}
           springPreset={springPreset}
           onSpringPresetChange={setSpringPreset}
           deadzoneEnabled={deadzoneEnabled}
@@ -527,13 +471,6 @@ export default function App() {
         autoBlurMarkers={autoBlurMarkers}
       />
 
-      <LicenseModal
-        isOpen={isLicenseModalOpen}
-        onClose={() => setIsLicenseModalOpen(false)}
-        status={licenseStatus}
-        onActivate={handleActivateLicense}
-        onDeactivate={handleDeactivateLicense}
-      />
 
       {/* Export Success Toast */}
       {exportToast && (

@@ -1,6 +1,7 @@
 # Rust build artifacts
 /target/
 src-tauri/target/
+*.exe
 
 # Node dependencies and production build
 node_modules/

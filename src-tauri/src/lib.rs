@@ -5,7 +5,6 @@ pub mod capture;
 pub mod error;
 pub mod export;
 pub mod exporter;
-pub mod licensing;
 pub mod kinematics;
 pub mod motion;
 pub mod privacy;
@@ -101,13 +100,6 @@ pub mod commands {
         crate::privacy::patterns::find_sensitive_spans(&text)
     }
 
-    /// Scan OCR lines and word bounding rects for sensitive tokens and output redaction coordinates
-    #[tauri::command]
-    pub fn scan_ocr_lines_for_secrets(lines: Vec<crate::privacy::ocr::OcrLineInfo>) -> Vec<crate::privacy::ocr::RedactionRect> {
-        let engine = crate::privacy::ocr::NativeOcrEngine::new();
-        engine.extract_redactions(&lines)
-    }
-
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -164,21 +156,16 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            crate::licensing::startup_guard::get_hardware_id,
-            crate::licensing::startup_guard::get_license_status,
-            crate::licensing::startup_guard::activate_license,
-            crate::licensing::startup_guard::activate_license_key,
-            crate::licensing::startup_guard::deactivate_license,
             crate::capture::session::start_recording,
             crate::capture::session::stop_recording,
             crate::capture::session::get_recording_status,
             crate::capture::session::trigger_live_snip,
             crate::capture::session::get_available_sources,
+            crate::kinematics::camera::get_solved_camera_keyframes,
             crate::commands::save_recording_to_destination,
             crate::commands::pick_export_destination,
             crate::commands::export_rendered_video,
             crate::commands::scan_text_for_secrets,
-            crate::commands::scan_ocr_lines_for_secrets,
         ])
         .run(tauri::generate_context!())
         .expect("error while running PanGlide application");

@@ -12,13 +12,27 @@ pub enum InputEventType {
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InputEvent {
     pub timestamp_us: u64,
+    #[serde(default, alias = "timestamp_ms")]
+    pub timestamp_ms: u64,
     pub event_type: InputEventType, // Move, MouseDown, MouseUp, KeyDown, KeyUp, Wheel
     pub x: f32, // Normalized display coordinates (0.0 to 1.0)
     pub y: f32,
     pub button: u8,
     pub key_code: u32,
+}
+
+impl InputEvent {
+    #[inline(always)]
+    pub fn get_timestamp_ms(&self) -> u64 {
+        if self.timestamp_ms > 0 {
+            self.timestamp_ms
+        } else {
+            self.timestamp_us / 1000
+        }
+    }
 }
 
 #[repr(u8)]

@@ -108,6 +108,8 @@ pub struct RecordingResultDto {
     pub frame_count: u64,
     pub width: u32,
     pub height: u32,
+    #[serde(default)]
+    pub camera_keyframes: Vec<crate::kinematics::CameraFrame>,
     pub auto_blur_markers: Vec<AutoBlurMarkerDto>,
     pub rejected_takes: Vec<RejectedTakeDto>,
     pub rejected_take_intervals: Vec<RejectedTakeDto>,
@@ -545,7 +547,7 @@ pub fn get_available_sources() -> Vec<CaptureSourceDto> {
             CaptureSourceDto {
                 id: format!("monitor_{}", mon.index),
                 name: format!(
-                    "{}{} — {}×{}",
+                    "{}{} - {}x{}",
                     clean_name, primary_tag, mon.width, mon.height
                 ),
                 is_monitor: true,
@@ -649,9 +651,10 @@ pub fn start_recording(source_id: Option<String>) -> std::result::Result<Recordi
         monitor.height,
     );
     let telemetry_consumer = crate::telemetry::hooks::InputHookManager::start_telemetry_capture(65536);
+    crate::telemetry::hooks::InputHookManager::set_recording_active(true);
 
     let source_name = format!(
-        "{}{} — {}×{}",
+        "{}{} - {}x{}",
         monitor.name,
         if monitor.is_primary { " (Primary)" } else { "" },
         monitor.width,
@@ -1153,6 +1156,7 @@ pub fn stop_recording() -> std::result::Result<RecordingResultDto, String> {
 
     // Signal capture thread to stop and release telemetry hooks
     session.is_active.store(false, Ordering::SeqCst);
+    crate::telemetry::hooks::InputHookManager::set_recording_active(false);
     crate::telemetry::hooks::InputHookManager::stop_telemetry_capture();
     crate::telemetry::hooks::InputHookManager::clear_target_monitor();
 
@@ -1203,7 +1207,7 @@ pub fn stop_recording() -> std::result::Result<RecordingResultDto, String> {
             display_height: session.height,
         },
         rejected_takes: rejected_markers,
-        events: recorded_events,
+        events: recorded_events.clone(),
     };
 
     match serde_json::to_string_pretty(&sidecar) {
@@ -1225,13 +1229,25 @@ pub fn stop_recording() -> std::result::Result<RecordingResultDto, String> {
         .unwrap_or(&raw_path)
         .replace('\\', "/");
 
+    // Solve deterministic second-order camera keyframes across the clip
+    let camera_keyframes = crate::kinematics::solve_camera_keyframes(
+        &recorded_events,
+        duration_ms,
+        session.width,
+        session.height,
+        1.5,
+    );
+    crate::kinematics::cache_latest_keyframes(video_path.clone(), camera_keyframes.clone());
+
+    let auto_blur_markers: Vec<AutoBlurMarkerDto> = Vec::new();
+
     // Verify the output file exists and has meaningful size
     let file_size = fs::metadata(&session.output_path)
         .map(|m| m.len())
         .unwrap_or(0);
     eprintln!(
-        "[PanGlide] Recording complete: {} ({} bytes, {} frames, {}ms)",
-        video_path, file_size, frame_count, duration_ms
+        "[PanGlide] Recording complete: {} ({} bytes, {} frames, {}ms, {} solved camera keyframes)",
+        video_path, file_size, frame_count, duration_ms, camera_keyframes.len()
     );
 
     Ok(RecordingResultDto {
@@ -1241,7 +1257,8 @@ pub fn stop_recording() -> std::result::Result<RecordingResultDto, String> {
         frame_count,
         width: session.width,
         height: session.height,
-        auto_blur_markers: Vec::new(),
+        camera_keyframes,
+        auto_blur_markers,
         rejected_takes: rejected_takes.clone(),
         rejected_take_intervals: rejected_takes,
         zoom_keyframes,
@@ -1455,6 +1472,7 @@ mod tests {
         // Also ensure a direct ring buffer event is recorded
         crate::telemetry::hooks::InputHookManager::record_input_event(crate::telemetry::types::InputEvent {
             timestamp_us: 1_000_000,
+            timestamp_ms: 1_000,
             event_type: crate::telemetry::types::InputEventType::Move,
             x: 0.5,
             y: 0.5,

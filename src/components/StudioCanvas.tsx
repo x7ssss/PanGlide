@@ -1,6 +1,7 @@
-import { useRef } from "react";
+import { useRef, useState, useEffect } from "react";
 import { Video, ShieldCheck, Sparkles, RotateCcw, Play, Lock } from "lucide-react";
-import type { AspectRatioPreset, AutoBlurMarker } from "../types";
+import { invoke } from "@tauri-apps/api/core";
+import type { AspectRatioPreset, AutoBlurMarker, CameraFrame } from "../types";
 
 interface StudioCanvasProps {
   aspectRatio: AspectRatioPreset;
@@ -10,11 +11,14 @@ interface StudioCanvasProps {
   zoomScale: number;
   showFocusReticle: boolean;
   autoRedactEnabled: boolean;
+  preEncodeTokenMasking?: boolean;
   autoBlurMarkers: AutoBlurMarker[];
   cameraCenter: { x: number; y: number }; // normalized [0..1]
   // Real Capture & Video props
   isRecording: boolean;
   videoUrl: string | null;
+  videoPath?: string | null;
+  solvedKeyframes?: CameraFrame[];
   onResetVideo?: () => void;
   telemetryPoint?: { x: number; y: number } | null;
   // Custom video playback bindings
@@ -34,11 +38,14 @@ export default function StudioCanvas({
   zoomScale,
   showFocusReticle,
   autoRedactEnabled,
+  preEncodeTokenMasking,
   autoBlurMarkers,
   isRecording,
   videoUrl,
+  videoPath,
+  solvedKeyframes,
   onResetVideo,
-  telemetryPoint,
+  telemetryPoint: _telemetryPoint,
   videoRef: externalVideoRef,
   isPlaying = false,
   onTogglePlay,
@@ -49,6 +56,78 @@ export default function StudioCanvas({
   const canvasContainerRef = useRef<HTMLDivElement>(null);
   const internalVideoRef = useRef<HTMLVideoElement>(null);
   const activeVideoRef = externalVideoRef || internalVideoRef;
+
+  const [cameraFrames, setCameraFrames] = useState<CameraFrame[]>(solvedKeyframes || []);
+  const [reticleState, setReticleState] = useState<{ x: number; y: number; zoom: number }>({
+    x: 0.5,
+    y: 0.5,
+    zoom: 1.0,
+  });
+
+  // On recording load, fetch solved camera frames via get_solved_camera_keyframes
+  useEffect(() => {
+    if (solvedKeyframes && solvedKeyframes.length > 0) {
+      setCameraFrames(solvedKeyframes);
+      return;
+    }
+
+    if (videoUrl) {
+      invoke<CameraFrame[]>("get_solved_camera_keyframes", {
+        sessionId: videoPath || "latest",
+      })
+        .then((frames) => {
+          if (frames && frames.length > 0) {
+            console.log(`[PanGlide Studio] Loaded ${frames.length} solved camera frames`);
+            setCameraFrames(frames);
+          }
+        })
+        .catch((err) => {
+          console.warn("[PanGlide Studio] Failed to fetch solved camera keyframes:", err);
+        });
+    } else {
+      setCameraFrames([]);
+      setReticleState({ x: 0.5, y: 0.5, zoom: 1.0 });
+    }
+  }, [videoUrl, videoPath, solvedKeyframes]);
+
+  // Video playback requestAnimationFrame loop
+  useEffect(() => {
+    let animId: number;
+
+    const updateCameraStyling = () => {
+      const video = activeVideoRef.current;
+      if (video && cameraFrames.length > 0) {
+        const curSec = video.currentTime;
+        const frameIdx = Math.min(
+          cameraFrames.length - 1,
+          Math.max(0, Math.round(curSec * 60))
+        );
+        const frame = cameraFrames[frameIdx];
+
+        if (frame) {
+          // Set transformOrigin = `${frame.x * 100}% ${frame.y * 100}%`
+          video.style.transformOrigin = `${frame.x * 100}% ${frame.y * 100}%`;
+          // Set transform = `scale(${frame.zoom})`
+          video.style.transform = `scale(${frame.zoom})`;
+
+          // Update ACTIVE FOCUS reticle badge text and target coordinates
+          setReticleState({
+            x: frame.x,
+            y: frame.y,
+            zoom: frame.zoom,
+          });
+        }
+      } else if (video && cameraFrames.length === 0) {
+        video.style.transformOrigin = "50% 50%";
+        video.style.transform = `scale(${zoomScale})`;
+      }
+
+      animId = requestAnimationFrame(updateCameraStyling);
+    };
+
+    animId = requestAnimationFrame(updateCameraStyling);
+    return () => cancelAnimationFrame(animId);
+  }, [cameraFrames, zoomScale]);
 
   // Backdrop background CSS styles
   const getBackdropStyle = () => {
@@ -100,7 +179,7 @@ export default function StudioCanvas({
         <div
           className="relative w-full h-full origin-center"
           style={{
-            transform: `scale(${zoomScale})`,
+            transform: videoUrl ? "none" : `scale(${zoomScale})`,
             transformOrigin: "center center",
             transition: "transform 0.25s cubic-bezier(0.16, 1, 0.3, 1)",
           }}
@@ -108,7 +187,7 @@ export default function StudioCanvas({
           {/* STATE 1: Completed Video Playback (Custom Controls - Native browser controls stripped) */}
           {videoUrl ? (
             <div
-              className="relative w-full h-full bg-black flex items-center justify-center cursor-pointer group"
+              className="relative w-full h-full bg-black flex items-center justify-center cursor-pointer group overflow-hidden"
               onClick={onTogglePlay}
             >
               <video
@@ -117,7 +196,7 @@ export default function StudioCanvas({
                 autoPlay={false}
                 preload="auto"
                 playsInline
-                className="w-full h-full object-contain pointer-events-none"
+                className="w-full h-full object-contain pointer-events-none will-change-transform"
                 onTimeUpdate={(e) => onTimeUpdate?.(e.currentTarget.currentTime)}
                 onLoadedMetadata={(e) => onLoadedMetadata?.(e.currentTarget.duration)}
                 onEnded={onEnded}
@@ -205,7 +284,7 @@ export default function StudioCanvas({
 
           {/* DYNAMIC: Amber Frosted Auto-Redact Overlays */}
           {(isRecording || videoUrl) &&
-            autoRedactEnabled &&
+            (autoRedactEnabled ?? preEncodeTokenMasking ?? true) &&
             autoBlurMarkers.map((marker) => (
               <div
                 key={marker.id}
@@ -228,18 +307,14 @@ export default function StudioCanvas({
 
         {/* DYNAMIC: AMBER ANIMATED DASHED FOCUS RETICLE (Only rendered when video is actively loaded) */}
         {showFocusReticle && !!videoUrl && (
-          <div className="absolute inset-0 pointer-events-none z-30 flex items-center justify-center">
+          <div className="absolute inset-0 pointer-events-none z-30">
             <div
-              className="relative w-52 h-36 border-2 border-dashed border-amber-400/90 rounded-xl shadow-2xl shadow-amber-500/20 animate-pulse transition-transform duration-100"
-              style={
-                telemetryPoint && isRecording
-                  ? {
-                      transform: `translate(${(telemetryPoint.x - 0.5) * 60}px, ${
-                        (telemetryPoint.y - 0.5) * 60
-                      }px)`,
-                    }
-                  : undefined
-              }
+              className="absolute w-52 h-36 border-2 border-dashed border-amber-400/90 rounded-xl shadow-2xl shadow-amber-500/20 animate-pulse transition-all duration-75"
+              style={{
+                left: `${reticleState.x * 100}%`,
+                top: `${reticleState.y * 100}%`,
+                transform: "translate(-50%, -50%)",
+              }}
             >
               {/* Corner Accent Brackets */}
               <div className="absolute -top-1.5 -left-1.5 w-3.5 h-3.5 border-t-2 border-l-2 border-amber-400" />
@@ -255,7 +330,7 @@ export default function StudioCanvas({
 
               {/* Reticle Badge */}
               <div className="absolute -bottom-7 left-1/2 -translate-x-1/2 px-2.5 py-0.5 rounded-full bg-[#0B0D13]/95 border border-amber-500/50 text-[10px] font-mono text-amber-300 font-semibold tracking-wider whitespace-nowrap shadow-md">
-                ACTIVE FOCUS • {zoomScale.toFixed(2)}x
+                ACTIVE FOCUS • {reticleState.zoom.toFixed(2)}x
               </div>
             </div>
           </div>
